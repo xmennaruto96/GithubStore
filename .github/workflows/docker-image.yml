@@ -10,8 +10,8 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/yazdipour/githubstore
-
+  IMAGE_NAME: ghcr.io/xmennaruto96/githubstore
+  
 jobs:
   build:
     runs-on: ubuntu-latest
