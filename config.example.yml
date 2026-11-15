@@ -6,6 +6,11 @@ server:
 github:
   # Optional, but recommended to avoid low unauthenticated GitHub API limits.
   token: ""
+  # Include pre-releases (alpha / beta / nightly). The newest build wins by its
+  # real publish/upload time. Override per repository with `prereleases: false`.
+  prereleases: true
+  # How many recent releases to scan per repository (1-100).
+  max_releases: 30
 
 source:
   name: GithubStore
