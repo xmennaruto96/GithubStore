@@ -20,7 +20,7 @@ GithubStore reads each configured repository's latest GitHub release and adds th
 ```yaml
 services:
   app:
-    image: ghcr.io/yazdipour/githubstore:latest
+    image: ghcr.io/xmennaruto96/githubstore:latest
     ports:
       - "8080:8080" # if port 8080 is already in use, change the left side to an available port, e.g. "8081:8080" and do not forget to update the base_url in config.yml accordingly.
     volumes:
