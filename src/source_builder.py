@@ -165,9 +165,32 @@ def _identifier_component(value: str) -> str:
     return component or "app"
 
 
+_DOTTED_VERSION = re.compile(r"\d+(?:\.\d+)+[0-9A-Za-z.+_-]*")
+
+
+def _display_version(release: dict) -> str:
+    """Best human version: the tag, unless the tag is a bare build number.
+
+    Some projects tag builds as "30" and keep the real version ("3.0.13-30") in
+    the release title or the IPA filename. In that case the first dotted
+    version found in the title, then in the asset names, wins.
+    """
+    tag = str(release.get("tag_name") or "").strip()
+    name = str(release.get("name") or "").strip()
+    if "." not in tag:
+        sources = [name] + [
+            Path(str(a.get("name") or "")).stem
+            for a in sorted(_ipa_assets(release), key=_asset_sort_key)
+        ]
+        for text in sources:
+            match = _DOTTED_VERSION.search(text)
+            if match:
+                return match.group(0).rstrip(".-_+")
+    return tag or name
+
+
 def _release_version(release: dict) -> str:
-    tag = str(release.get("tag_name") or release.get("name") or "").strip()
-    version = tag.lstrip("v") or "1.0"
+    version = _display_version(release).lstrip("v") or "1.0"
     # Rolling tags ("nightly", "latest", "continuous") never change, so a client
     # would never see an update. Make them unique per build.
     if not any(ch.isdigit() for ch in version):
