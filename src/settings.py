@@ -70,6 +70,7 @@ class RepositoryConfig:
     icon: str
     config_index: int
     config_key: str
+    prereleases: bool = True
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class Settings:
     source_icon_url: str
     source_cache_seconds: int
     github_token: str
+    github_max_releases: int
     host: str
     server_ui_config: bool
 
@@ -128,7 +130,17 @@ def repository_config_key(raw_repo: Any) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _load_repositories(default_tint_color: str) -> tuple[RepositoryConfig, ...]:
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _load_repositories(
+    default_tint_color: str, default_prereleases: bool = True
+) -> tuple[RepositoryConfig, ...]:
     repositories = _get_config("repositories")
     if repositories is None:
         return ()
@@ -164,6 +176,7 @@ def _load_repositories(default_tint_color: str) -> tuple[RepositoryConfig, ...]:
                 icon=icon,
                 config_index=config_index,
                 config_key=repository_config_key(raw_repo),
+                prereleases=_as_bool(repo_data.get("prereleases"), default_prereleases),
             )
         )
 
@@ -185,11 +198,14 @@ def load_settings() -> Settings:
         ).strip(),
         source_tint_color=source_tint_color,
         source_icon=str(_setting("source.icon", "")).strip(),
-        repositories=_load_repositories(source_tint_color),
+        repositories=_load_repositories(
+            source_tint_color, _bool_setting("github.prereleases", True)
+        ),
         base_url=_base_url(str(_setting("server.base_url", "http://localhost:8080"))),
         source_icon_url=str(_setting("source.icon_url", SOURCE_ICON_URL)).strip(),
         source_cache_seconds=int(_setting("source.cache_seconds", "600")),
         github_token=str(_setting("github.token") or os.getenv("GITHUB_TOKEN", "")).strip(),
+        github_max_releases=max(1, min(100, int(_setting("github.max_releases", 30)))),
         host=str(_setting("server.host", "0.0.0.0")).strip(),
         server_ui_config=_bool_setting("server.ui_config", False),
     )
