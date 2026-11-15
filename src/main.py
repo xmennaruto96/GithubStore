@@ -494,6 +494,11 @@ async def delete_repository(repo_index: int, request: Request):
     return _redirect_home()
 
 
+def _pretty_json(value: object) -> Response:
+    body = json.dumps(value, indent=2, ensure_ascii=False)
+    return Response(content=body, media_type="application/json; charset=utf-8")
+
+
 @app.get("/source.json")
 async def source_json():
     return await named_source_json(settings.source_slug)
@@ -507,12 +512,12 @@ async def named_source_json(source_slug: str):
     now = monotonic()
     cached_source = source_cache["value"]
     if cached_source is not None and now < float(source_cache["expires_at"]):
-        return JSONResponse(cached_source)
+        return _pretty_json(cached_source)
 
     source = await build_source(settings)
     source_cache["value"] = source
     source_cache["expires_at"] = now + max(settings.source_cache_seconds, 0)
-    return JSONResponse(source)
+    return _pretty_json(source)
 
 
 if __name__ == "__main__":
