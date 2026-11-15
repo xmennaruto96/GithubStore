@@ -3,6 +3,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -33,7 +34,7 @@ def _repo_from_url(value: str) -> GithubRepo:
     return GithubRepo(owner=parts[0], name=parts[1].removesuffix(".git"))
 
 
-def _request_json(url: str, settings: Settings) -> dict:
+def _request_json(url: str, settings: Settings) -> Any:
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "GithubStore",
@@ -53,16 +54,74 @@ def _request_json(url: str, settings: Settings) -> dict:
         raise GithubReleaseError(f"Could not reach GitHub API for {url}: {exc.reason}") from exc
 
     value = json.loads(data)
-    if not isinstance(value, dict):
+    if not isinstance(value, (dict, list)):
         raise GithubReleaseError(f"Unexpected GitHub API response for {url}")
     return value
 
 
-def _latest_release(settings: Settings, repo: GithubRepo) -> dict:
-    return _request_json(
-        f"https://api.github.com/repos/{repo.owner}/{repo.name}/releases/latest",
+def _parse_ts(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+_EPOCH = datetime.min.replace(tzinfo=UTC)
+
+
+def _release_timestamp(release: dict, assets: list[dict]) -> datetime:
+    """When this build really appeared, as opposed to what the release claims.
+
+    - `created_at` on a release is the date of the *commit* it points at, so a
+      fresh build of an old commit looks ancient. It is only a last resort.
+    - Nightly / rolling releases keep one tag and one `published_at` forever and
+      just re-upload the asset, so the asset's own created/updated time is the
+      only honest signal.
+    The newest of all of these wins.
+    """
+    stamps = [_parse_ts(release.get("published_at"))]
+    for asset in assets:
+        stamps.append(_parse_ts(asset.get("created_at")))
+        stamps.append(_parse_ts(asset.get("updated_at")))
+    found = [s for s in stamps if s is not None]
+    if found:
+        return max(found)
+    return _parse_ts(release.get("created_at")) or _EPOCH
+
+
+def _select_release(releases: object, include_prereleases: bool) -> dict | None:
+    """Newest installable release by real timestamp, not by list order."""
+    if not isinstance(releases, list):
+        return None
+    best: tuple[datetime, dict] | None = None
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft"):
+            continue
+        if release.get("prerelease") and not include_prereleases:
+            continue
+        assets = _ipa_assets(release)
+        if not assets:
+            continue
+        stamp = _release_timestamp(release, assets)
+        if best is None or stamp > best[0]:
+            best = (stamp, release)
+    return best[1] if best else None
+
+
+def _latest_release(settings: Settings, repo: GithubRepo, include_prereleases: bool) -> dict:
+    releases = _request_json(
+        f"https://api.github.com/repos/{repo.owner}/{repo.name}/releases"
+        f"?per_page={settings.github_max_releases}",
         settings,
     )
+    release = _select_release(releases, include_prereleases)
+    if release is None:
+        kind = "release" if include_prereleases else "stable release"
+        raise GithubReleaseError(f"No {kind} with an .ipa asset found for {repo.owner}/{repo.name}")
+    return release
 
 
 def _ipa_assets(release: dict) -> list[dict]:
@@ -88,7 +147,7 @@ def _asset_sort_key(asset: dict) -> tuple[int, int]:
 def _release_ipa_assets(release: dict, repo: GithubRepo) -> list[dict]:
     assets = sorted(_ipa_assets(release), key=_asset_sort_key)
     if not assets:
-        raise GithubReleaseError(f"No .ipa asset found on latest release for {repo.owner}/{repo.name}")
+        raise GithubReleaseError(f"No .ipa asset found on the selected release for {repo.owner}/{repo.name}")
     return assets
 
 
@@ -108,24 +167,41 @@ def _identifier_component(value: str) -> str:
 
 def _release_version(release: dict) -> str:
     tag = str(release.get("tag_name") or release.get("name") or "").strip()
-    return tag.lstrip("v") or "1.0"
+    version = tag.lstrip("v") or "1.0"
+    # Rolling tags ("nightly", "latest", "continuous") never change, so a client
+    # would never see an update. Make them unique per build.
+    if not any(ch.isdigit() for ch in version):
+        version = f"{version}-{_release_stamp(release):%Y%m%d.%H%M}"
+    return version
+
+
+def _release_stamp(release: dict) -> datetime:
+    return _release_timestamp(release, _ipa_assets(release))
+
+
+def _build_version(release: dict, version: str) -> str:
+    # Pre-releases are often re-uploaded under the same tag; the timestamp keeps
+    # each upload distinguishable.
+    if release.get("prerelease"):
+        stamp = f"{_release_stamp(release):%Y%m%d%H%M}"
+        return version if stamp in version.replace(".", "").replace("-", "") else f"{version}+{stamp}"
+    return version
 
 
 def _release_date(release: dict) -> str:
-    value = str(release.get("published_at") or release.get("created_at") or "").strip()
-    if value:
-        return value
+    stamp = _release_stamp(release)
+    if stamp > _EPOCH:
+        return stamp.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _description(release: dict, repo: GithubRepo) -> str:
     body = str(release.get("body") or "").strip()
-    if body:
-        return body
     name = str(release.get("name") or release.get("tag_name") or "").strip()
-    if name:
-        return name
-    return f"Latest GitHub release for {repo.owner}/{repo.name}."
+    text = body or name or f"Latest GitHub release for {repo.owner}/{repo.name}."
+    if release.get("prerelease"):
+        return f"Pre-release\n\n{text}"
+    return text
 
 
 def _is_http_url(value: str) -> bool:
@@ -168,7 +244,7 @@ def _app_from_release(
         "versions": [
             {
                 "version": version,
-                "buildVersion": version,
+                "buildVersion": _build_version(release, version),
                 "date": _release_date(release),
                 "downloadURL": download_url,
                 "localizedDescription": description,
@@ -180,7 +256,7 @@ def _app_from_release(
 
 def _build_apps(settings: Settings, repo_config: RepositoryConfig) -> list[dict]:
     repo = _repo_from_url(repo_config.url)
-    release = _latest_release(settings, repo)
+    release = _latest_release(settings, repo, repo_config.prereleases)
     assets = _release_ipa_assets(release, repo)
     include_asset_identity = len(assets) > 1
     return [
